@@ -24,7 +24,7 @@ class Application(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Генератор схем для страз v1.0")
-        self.geometry("800x700")
+        self.geometry("900x800")  # увеличил окно
         self.image_path = None
         self.processed_image = None
         self.setup_ui()
@@ -36,8 +36,8 @@ class Application(tk.Tk):
         # Кнопка загрузки
         tk.Button(self, text="📁 Загрузить фото", command=self.load_image, bg="#4CAF50", fg="white", font=("Arial", 12)).pack(pady=5)
         
-        # Превью
-        self.preview_label = tk.Label(self, text="Фото не выбрано", bg="lightgray", width=80, height=10)
+        # Превью (увеличено)
+        self.preview_label = tk.Label(self, text="Фото не выбрано", bg="lightgray", width=100, height=20)
         self.preview_label.pack(pady=10)
         
         # Панель настроек
@@ -70,7 +70,8 @@ class Application(tk.Tk):
         if path:
             self.image_path = path
             img = Image.open(path)
-            img.thumbnail((600, 300))
+            # Увеличил превью до 700x500
+            img.thumbnail((700, 500))
             photo = ImageTk.PhotoImage(img)
             self.preview_label.config(image=photo, text="")
             self.preview_label.image = photo
@@ -144,7 +145,8 @@ class Application(tk.Tk):
                     
                     cx = x * cell_size + 10 + cell_size/2
                     cy = y * cell_size + 10 + cell_size/2
-                    pdf.circle(cx, cy, radius, 'F')
+                    # ИСПРАВЛЕНО: используем ellipse вместо circle
+                    pdf.ellipse(cx - radius, cy - radius, 2*radius, 2*radius, 'F')
             
             # Сохранение
             save_path = filedialog.asksaveasfilename(defaultextension=".pdf", filetypes=[("PDF files", "*.pdf")])
