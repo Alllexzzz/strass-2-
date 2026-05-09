@@ -21,6 +21,7 @@ STRASS_SIZES = {
 }
 
 def get_closest_strass(diameter_mm, sizes_dict):
+    """Возвращает ключ (название SS) и значение (диаметр) ближайшего размера"""
     best = None
     best_dist = float('inf')
     for name, size in sizes_dict.items():
@@ -31,23 +32,24 @@ def get_closest_strass(diameter_mm, sizes_dict):
     return best
 
 def auto_recommend_size(complexity_map, edges, default_mm=4.0):
+    """Анализирует сложность изображения и рекомендует базовый размер страза"""
     total_blocks = complexity_map.size
     hard_blocks = np.count_nonzero(complexity_map > 0.3)
     hard_ratio = hard_blocks / max(total_blocks, 1)
     if hard_ratio > 0.4:
-        suggested_mm = 2.0
+        suggested_mm = 2.0  # SS6
     elif hard_ratio > 0.2:
-        suggested_mm = 2.8
+        suggested_mm = 2.8  # SS10
     elif hard_ratio > 0.1:
-        suggested_mm = 3.1
+        suggested_mm = 3.1  # SS12
     else:
-        suggested_mm = 4.0
+        suggested_mm = 4.0  # SS16
     return get_closest_strass(suggested_mm, STRASS_SIZES)
 
 class Application(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Генератор схем для страз v3.1")
+        self.title("Генератор схем для страз v4.0")
         self.geometry("1100x850")
         self.image_path = None
         self.original_image = None
@@ -56,6 +58,7 @@ class Application(tk.Tk):
         self.setup_ui()
 
     def setup_ui(self):
+        # Панель инструментов
         toolbar = tk.Frame(self, bd=1, relief=tk.RAISED)
         toolbar.pack(side=tk.TOP, fill=tk.X)
         tk.Button(toolbar, text="📁 Загрузить фото", command=self.load_image, bg="#4CAF50", fg="white").pack(side=tk.LEFT, padx=2, pady=2)
@@ -66,15 +69,18 @@ class Application(tk.Tk):
         tk.Button(toolbar, text="🖼️ Сохранить JPEG", command=lambda: self.save_schema_image("jpeg"), bg="#9C27B0", fg="white").pack(side=tk.LEFT, padx=2, pady=2)
         tk.Button(toolbar, text="Выход", command=self.quit, bg="#f44336", fg="white").pack(side=tk.RIGHT, padx=2, pady=2)
 
+        # Основная область
         main_frame = tk.Frame(self)
         main_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
+        # Левая панель: превью загруженного изображения
         left_frame = tk.LabelFrame(main_frame, text="Исходное изображение", padx=5, pady=5)
         left_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
         self.canvas = tk.Canvas(left_frame, width=800, height=600, bg="lightgray")
         self.canvas.pack(fill=tk.BOTH, expand=True)
 
+        # Правая панель: настройки
         right_frame = tk.LabelFrame(main_frame, text="Параметры", padx=5, pady=5)
         right_frame.pack(side=tk.RIGHT, fill=tk.Y, padx=(5,0))
 
@@ -89,6 +95,10 @@ class Application(tk.Tk):
         self.width_var = tk.DoubleVar(value=40.0)
         tk.Spinbox(right_frame, textvariable=self.width_var, from_=5.0, to=150.0, increment=1.0, width=10).pack(anchor=tk.W, pady=2)
 
+        tk.Label(right_frame, text="Детализация (страз в ширину):").pack(anchor=tk.W)
+        self.detail_var = tk.IntVar(value=400)
+        tk.Scale(right_frame, from_=100, to=800, orient=tk.HORIZONTAL, variable=self.detail_var).pack(anchor=tk.W, pady=2)
+
         tk.Label(right_frame, text="Количество цветов:").pack(anchor=tk.W)
         self.colors_var = tk.IntVar(value=25)
         tk.Spinbox(right_frame, textvariable=self.colors_var, from_=5, to=50, width=10).pack(anchor=tk.W, pady=2)
@@ -96,6 +106,7 @@ class Application(tk.Tk):
         self.bg_var = tk.BooleanVar(value=False)
         tk.Checkbutton(right_frame, text="Вырезать объект с фона", variable=self.bg_var).pack(anchor=tk.W, pady=5)
 
+        # Статус и прогресс
         self.status_label = tk.Label(self, text="Готов к работе", font=("Arial", 10))
         self.status_label.pack(side=tk.BOTTOM, fill=tk.X)
 
@@ -164,62 +175,47 @@ class Application(tk.Tk):
             bead_size_mm = STRASS_SIZES[self.size_var.get()]
             desired_width_cm = self.width_var.get()
             num_colors = self.colors_var.get()
+            target_width = self.detail_var.get()  # основное разрешение
 
-            self.update_status("Анализ сложности...", 10)
-            gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
-            edges = cv2.Canny(gray, 50, 150)
+            # Вычисляем высоту, сохраняя пропорции
+            ratio = img_array.shape[0] / img_array.shape[1]
+            target_height = int(target_width * ratio)
 
-            self.update_status("Уменьшение цветов...", 20)
+            self.update_status("Уменьшение цветов...", 10)
             img_pil = Image.fromarray(img_array)
             quantized = img_pil.quantize(colors=num_colors, method=Image.Quantize.MEDIANCUT).convert("RGB")
 
-            beads_per_cm = 10 / bead_size_mm
-            target_width = int(desired_width_cm * beads_per_cm)
-            w_percent = target_width / img_array.shape[1]
-            target_height = int(img_array.shape[0] * w_percent)
-
-            block_size = max(8, min(img_array.shape[0], img_array.shape[1]) // 60)
-            cell_size = min(380 / target_width, 250 / target_height)
-            base_radius = cell_size / 2 - 0.1
-
-            # Создаем превью в полном размере (1:1)
-            self.update_status("Построение схемы...", 30)
+            self.update_status("Построение схемы...", 20)
+            # Создаём превью (полноразмерное)
             preview_img = Image.new("RGB", (target_width, target_height), "white")
             draw_preview = ImageDraw.Draw(preview_img)
 
+            # PDF-документ
             pdf = FPDF(orientation='L', unit='mm', format='A3')
             pdf.add_page()
+            # Вычисляем размер ячейки, чтобы вписать в A3 (420x297 мм с полями)
+            cell_size = min(380 / target_width, 250 / target_height)
+            radius = cell_size * 0.45  # чтобы круги не слипались
 
             stats = {}
-            total_pixels = target_height
+            total = target_height
 
             for y in range(target_height):
-                percent = 30 + (y / total_pixels) * 50
                 if y % 10 == 0:
+                    percent = 20 + (y / total) * 60
                     self.update_progress(percent)
                 for x in range(target_width):
-                    orig_y = int(y / target_height * img_array.shape[0])
+                    # Определяем исходные координаты пикселя
                     orig_x = int(x / target_width * img_array.shape[1])
+                    orig_y = int(y / target_height * img_array.shape[0])
 
-                    block_y = min(orig_y // block_size, (img_array.shape[0] // block_size) - 1)
-                    block_x = min(orig_x // block_size, (img_array.shape[1] // block_size) - 1)
-                    block = edges[block_y*block_size:(block_y+1)*block_size,
-                                 block_x*block_size:(block_x+1)*block_size]
-                    complexity = np.count_nonzero(block) / (block_size * block_size)
-
-                    if complexity > 0.3:
-                        radius = base_radius * 0.6
-                    elif complexity > 0.1:
-                        radius = base_radius * 0.8
-                    else:
-                        radius = base_radius
-
-                    actual_diameter = bead_size_mm * (radius / base_radius)
-                    ss_name, _ = get_closest_strass(actual_diameter, STRASS_SIZES)
-
+                    # Берём цвет из квантованного изображения
                     r, g, b = quantized.getpixel((orig_x, orig_y))
 
-                    # PDF
+                    # Используем один размер страза для всех кружков (без адаптивности)
+                    ss_name = self.size_var.get()
+
+                    # Рисуем в PDF
                     pdf.set_fill_color(r, g, b)
                     cx = x * cell_size + 10 + cell_size/2
                     cy = y * cell_size + 10 + cell_size/2
@@ -229,18 +225,18 @@ class Application(tk.Tk):
                     key = (r, g, b, ss_name)
                     stats[key] = stats.get(key, 0) + 1
 
-                    # Полноразмерный предпросмотр (один кружок — один пиксель или больше?)
-                    # Рисуем кружок диаметром 2 пикселя для наглядности
-                    draw_preview.ellipse([x-1, y-1, x+1, y+1], fill=(r,g,b))
+                    # Рисуем в превью (один кружок = один пиксель для простоты, т.к. их много, будет мелко, но на весь рисунок)
+                    draw_preview.point((x, y), fill=(r, g, b))
 
             self.update_status("Формирование легенды...", 85)
+            # Легенда в PDF
             pdf.add_page()
             pdf.set_font("Arial", size=8)
-            pdf.text(10, 10, "Легенда схемы (цвет, размер стразы, количество штук)")
+            pdf.text(10, 10, "Легенда схемы (цвет, размер страз, количество)")
 
             y_cursor = 18
             grouped = {}
-            for (r, g, b, ss), count in sorted(stats.items(), key=lambda x: (x[0][0], x[0][1], x[0][2], x[0][3])):
+            for (r, g, b, ss), count in sorted(stats.items(), key=lambda x: (x[0][2], x[0][1], x[0][0])):
                 grouped.setdefault((r,g,b), []).append((ss, count))
 
             for (r,g,b), items in grouped.items():
@@ -258,7 +254,7 @@ class Application(tk.Tk):
             self.schema_preview = preview_img
             self.update_status("Готово!", 100)
             self.progress_var.set(100)
-            messagebox.showinfo("Успех", "Схема создана. Вы можете сохранить PDF или изображение.")
+            messagebox.showinfo("Успех", "Схема создана! Можно сохранить PDF или изображение.")
 
         except Exception as e:
             self.update_status(f"Ошибка: {e}", 0)
@@ -277,11 +273,15 @@ class Application(tk.Tk):
         if self.pdf is None:
             messagebox.showinfo("Сохранение", "Сначала сгенерируйте схему.")
             return
-        path = filedialog.asksaveasfilename(defaultextension=".pdf", filetypes=[("PDF files", "*.pdf")])
+        path = filedialog.asksaveasfilename(defaultextension=".pdf",
+                                            filetypes=[("PDF files", "*.pdf")])
         if path:
-            self.pdf.output(path)
-            self.status_label.config(text=f"PDF сохранён: {os.path.basename(path)}")
-            messagebox.showinfo("Сохранение", f"Файл {path} сохранён.")
+            try:
+                self.pdf.output(path)
+                self.status_label.config(text=f"PDF сохранён: {os.path.basename(path)}")
+                messagebox.showinfo("Сохранение", f"Файл {path} сохранён.")
+            except Exception as e:
+                messagebox.showerror("Ошибка сохранения", str(e))
 
     def show_schema_preview(self):
         if self.schema_preview is None:
@@ -290,9 +290,9 @@ class Application(tk.Tk):
         preview_win = tk.Toplevel(self)
         preview_win.title("Предпросмотр схемы")
         w, h = self.schema_preview.size
-        # Ограничим максимальный размер окна 900x700 и впишем изображение
+        # Вписываем в окно 900x700
         max_w, max_h = 900, 700
-        ratio = min(max_w/w, max_h/h, 1.0)  # не увеличиваем, если меньше
+        ratio = min(max_w/w, max_h/h, 1.0)
         new_w = int(w * ratio)
         new_h = int(h * ratio)
         show_img = self.schema_preview.resize((new_w, new_h), Image.Resampling.NEAREST)
@@ -310,9 +310,12 @@ class Application(tk.Tk):
         path = filedialog.asksaveasfilename(defaultextension=f".{fmt}",
                                             filetypes=[(f"{fmt.upper()} files", f"*.{fmt}")])
         if path:
-            self.schema_preview.save(path)
-            self.status_label.config(text=f"Изображение сохранено: {os.path.basename(path)}")
-            messagebox.showinfo("Сохранение", f"Файл {path} сохранён.")
+            try:
+                self.schema_preview.save(path)
+                self.status_label.config(text=f"Изображение сохранено: {os.path.basename(path)}")
+                messagebox.showinfo("Сохранение", f"Файл {path} сохранён.")
+            except Exception as e:
+                messagebox.showerror("Ошибка", str(e))
 
 if __name__ == "__main__":
     app = Application()
