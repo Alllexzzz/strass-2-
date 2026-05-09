@@ -1,6 +1,6 @@
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
-from PIL import Image, ImageTk
+from PIL import Image, ImageTk, ImageDraw
 import numpy as np
 import cv2
 from fpdf import FPDF
@@ -20,145 +20,320 @@ STRASS_SIZES = {
     "SS40 (8.5 мм)": 8.5
 }
 
+def get_closest_strass(diameter_mm, sizes_dict):
+    """Возвращает ключ (название SS) и значение (диаметр) ближайшего размера"""
+    best = None
+    best_dist = float('inf')
+    for name, size in sizes_dict.items():
+        dist = abs(size - diameter_mm)
+        if dist < best_dist:
+            best_dist = dist
+            best = (name, size)
+    return best
+
+def auto_recommend_size(complexity_map, edges, default_mm=4.0):
+    """Анализирует сложность изображения и рекомендует базовый размер страза"""
+    # Считаем долю сложных блоков (где сложность > 0.3)
+    total_blocks = complexity_map.size
+    hard_blocks = np.count_nonzero(complexity_map > 0.3)
+    hard_ratio = hard_blocks / max(total_blocks, 1)
+    # Чем больше деталей, тем мельче рекомендуем
+    if hard_ratio > 0.4:
+        suggested_mm = 2.0  # SS6
+    elif hard_ratio > 0.2:
+        suggested_mm = 2.8  # SS10
+    elif hard_ratio > 0.1:
+        suggested_mm = 3.1  # SS12
+    else:
+        suggested_mm = 4.0  # SS16
+    # Находим ближайший из таблицы
+    return get_closest_strass(suggested_mm, STRASS_SIZES)
+
 class Application(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Генератор схем для страз v1.0")
-        self.geometry("900x800")  # увеличил окно
+        self.title("Генератор схем для страз v3.0")
+        self.geometry("1100x850")
         self.image_path = None
-        self.processed_image = None
+        self.original_image = None
+        self.schema_image = None  # Для предпросмотра результата
         self.setup_ui()
         
     def setup_ui(self):
-        # Заголовок
-        tk.Label(self, text="🎨 Генератор схем для выкладки картин бисером", font=("Arial", 14, "bold")).pack(pady=10)
-        
-        # Кнопка загрузки
-        tk.Button(self, text="📁 Загрузить фото", command=self.load_image, bg="#4CAF50", fg="white", font=("Arial", 12)).pack(pady=5)
-        
-        # Превью (увеличено)
-        self.preview_label = tk.Label(self, text="Фото не выбрано", bg="lightgray", width=100, height=20)
-        self.preview_label.pack(pady=10)
-        
-        # Панель настроек
-        settings_frame = tk.Frame(self)
-        settings_frame.pack(pady=10)
-        
-        tk.Label(settings_frame, text="Размер страз:", font=("Arial", 11)).grid(row=0, column=0, padx=5)
+        # Панель инструментов
+        toolbar = tk.Frame(self, bd=1, relief=tk.RAISED)
+        toolbar.pack(side=tk.TOP, fill=tk.X)
+        tk.Button(toolbar, text="Загрузить фото", command=self.load_image, bg="#4CAF50", fg="white").pack(side=tk.LEFT, padx=2, pady=2)
+        tk.Button(toolbar, text="Сгенерировать схему", command=self.start_processing, bg="#2196F3", fg="white").pack(side=tk.LEFT, padx=2, pady=2)
+        tk.Button(toolbar, text="Предпросмотр схемы", command=self.show_schema_preview, bg="#FF9800", fg="white").pack(side=tk.LEFT, padx=2, pady=2)
+        tk.Button(toolbar, text="Сохранить как PNG", command=lambda: self.save_schema_image("png"), bg="#9C27B0", fg="white").pack(side=tk.LEFT, padx=2, pady=2)
+        tk.Button(toolbar, text="Сохранить как JPEG", command=lambda: self.save_schema_image("jpeg"), bg="#9C27B0", fg="white").pack(side=tk.LEFT, padx=2, pady=2)
+        tk.Button(toolbar, text="Выход", command=self.quit, bg="#f44336", fg="white").pack(side=tk.RIGHT, padx=2, pady=2)
+
+        # Основная область
+        main_frame = tk.Frame(self)
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+
+        # Левая панель: превью загруженного изображения (Canvas)
+        left_frame = tk.LabelFrame(main_frame, text="Исходное изображение", padx=5, pady=5)
+        left_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        self.canvas = tk.Canvas(left_frame, width=800, height=600, bg="lightgray")
+        self.canvas.pack(fill=tk.BOTH, expand=True)
+
+        # Правая панель: настройки
+        right_frame = tk.LabelFrame(main_frame, text="Параметры", padx=5, pady=5)
+        right_frame.pack(side=tk.RIGHT, fill=tk.Y, padx=(5,0))
+
+        # Размер страз
+        tk.Label(right_frame, text="Размер страз:").pack(anchor=tk.W)
         self.size_var = tk.StringVar(value="SS16 (4.0 мм)")
-        size_menu = ttk.Combobox(settings_frame, textvariable=self.size_var, values=list(STRASS_SIZES.keys()), width=15)
-        size_menu.grid(row=0, column=1, padx=5)
-        
-        tk.Label(settings_frame, text="Ширина (см):", font=("Arial", 11)).grid(row=0, column=2, padx=5)
+        self.size_combo = ttk.Combobox(right_frame, textvariable=self.size_var, values=list(STRASS_SIZES.keys()), width=18)
+        self.size_combo.pack(anchor=tk.W, pady=2)
+
+        tk.Button(right_frame, text="Автоопределить размер", command=self.auto_size).pack(anchor=tk.W, pady=2)
+
+        # Ширина
+        tk.Label(right_frame, text="Ширина картины (см):").pack(anchor=tk.W)
         self.width_var = tk.DoubleVar(value=40.0)
-        tk.Spinbox(settings_frame, textvariable=self.width_var, from_=5.0, to=150.0, increment=1.0, width=10).grid(row=0, column=3, padx=5)
-        
-        tk.Label(settings_frame, text="Цветов:", font=("Arial", 11)).grid(row=0, column=4, padx=5)
+        tk.Spinbox(right_frame, textvariable=self.width_var, from_=5.0, to=150.0, increment=1.0, width=10).pack(anchor=tk.W, pady=2)
+
+        # Количество цветов
+        tk.Label(right_frame, text="Количество цветов:").pack(anchor=tk.W)
         self.colors_var = tk.IntVar(value=25)
-        tk.Spinbox(settings_frame, textvariable=self.colors_var, from_=5, to=50, width=8).grid(row=0, column=5, padx=5)
-        
+        tk.Spinbox(right_frame, textvariable=self.colors_var, from_=5, to=50, width=10).pack(anchor=tk.W, pady=2)
+
+        # Вырезание фона
         self.bg_var = tk.BooleanVar(value=False)
-        tk.Checkbutton(settings_frame, text="Вырезать объект с фона", variable=self.bg_var).grid(row=1, column=0, columnspan=6, pady=5)
-        
-        # Кнопки действий
-        tk.Button(self, text="⚙️ Сгенерировать схему", command=self.start_processing, bg="#2196F3", fg="white", font=("Arial", 12)).pack(pady=5)
+        tk.Checkbutton(right_frame, text="Вырезать объект с фона", variable=self.bg_var).pack(anchor=tk.W, pady=5)
+
+        # Статус и прогресс
         self.status_label = tk.Label(self, text="Готов к работе", font=("Arial", 10))
-        self.status_label.pack(pady=10)
-        
+        self.status_label.pack(side=tk.BOTTOM, fill=tk.X)
+
+        self.progress_var = tk.DoubleVar(value=0.0)
+        self.progress_bar = ttk.Progressbar(self, variable=self.progress_var, maximum=100)
+        self.progress_bar.pack(side=tk.BOTTOM, fill=tk.X, pady=(0,5))
+
     def load_image(self):
         path = filedialog.askopenfilename(filetypes=[("Images", "*.jpg *.jpeg *.png *.bmp")])
-        if path:
-            self.image_path = path
-            img = Image.open(path)
-            # Увеличил превью до 700x500
-            img.thumbnail((700, 500))
-            photo = ImageTk.PhotoImage(img)
-            self.preview_label.config(image=photo, text="")
-            self.preview_label.image = photo
-            self.status_label.config(text=f"Загружено: {os.path.basename(path)}")
-            
+        if not path:
+            return
+        self.image_path = path
+        self.original_image = Image.open(path).convert("RGB")
+        # Показываем на холсте
+        self.display_on_canvas(self.original_image)
+        self.status_label.config(text=f"Загружено: {os.path.basename(path)}")
+
+    def display_on_canvas(self, img):
+        """Масштабирует изображение под размер холста и отображает"""
+        w, h = img.size
+        canvas_w = self.canvas.winfo_width()
+        canvas_h = self.canvas.winfo_height()
+        if canvas_w < 10 or canvas_h < 10:  # окно ещё не показано
+            canvas_w, canvas_h = 800, 600
+        ratio = min(canvas_w / w, canvas_h / h)
+        new_w = int(w * ratio)
+        new_h = int(h * ratio)
+        display_img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+        self.tk_image = ImageTk.PhotoImage(display_img)
+        self.canvas.delete("all")
+        self.canvas.create_image(canvas_w//2, canvas_h//2, image=self.tk_image, anchor=tk.CENTER)
+
+    def auto_size(self):
+        if self.original_image is None:
+            messagebox.showwarning("Нет изображения", "Сначала загрузите фото.")
+            return
+        # Быстрый анализ сложности
+        img_array = np.array(self.original_image)
+        gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
+        edges = cv2.Canny(gray, 50, 150)
+        block_size = max(8, min(img_array.shape[0], img_array.shape[1]) // 60)
+        h_blocks = img_array.shape[0] // block_size
+        w_blocks = img_array.shape[1] // block_size
+        complexity_map = np.zeros((h_blocks, w_blocks))
+        for i in range(h_blocks):
+            for j in range(w_blocks):
+                block = edges[i*block_size:(i+1)*block_size, j*block_size:(j+1)*block_size]
+                complexity_map[i, j] = np.count_nonzero(block) / (block_size * block_size)
+        ss_name, _ = auto_recommend_size(complexity_map, edges)
+        self.size_var.set(ss_name)
+        self.status_label.config(text=f"Рекомендован размер: {ss_name}")
+
     def start_processing(self):
-        if not self.image_path:
+        if self.original_image is None:
             messagebox.showerror("Ошибка", "Сначала загрузите фото!")
             return
+        self.progress_var.set(0)
         self.status_label.config(text="Идёт обработка...")
         threading.Thread(target=self.generate_schema, daemon=True).start()
-        
+
     def generate_schema(self):
         try:
-            # Загрузка и предобработка
-            img = Image.open(self.image_path).convert("RGB")
+            img = self.original_image.copy()
             if self.bg_var.get():
+                self.update_status("Удаление фона...", 5)
                 img = remove(img.convert("RGBA")).convert("RGB")
-            
+
             img_array = np.array(img)
             bead_size_mm = STRASS_SIZES[self.size_var.get()]
             desired_width_cm = self.width_var.get()
             num_colors = self.colors_var.get()
-            
-            # Анализ сложности
+
+            self.update_status("Анализ сложности...", 10)
             gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
             edges = cv2.Canny(gray, 50, 150)
-            
-            # Уменьшение цветов
+
+            self.update_status("Уменьшение цветов...", 20)
             img_pil = Image.fromarray(img_array)
             quantized = img_pil.quantize(colors=num_colors, method=Image.Quantize.MEDIANCUT).convert("RGB")
-            
-            # Создание PDF
-            pdf = FPDF(orientation='L', unit='mm', format='A3')
-            pdf.add_page()
-            
+
             beads_per_cm = 10 / bead_size_mm
             target_width = int(desired_width_cm * beads_per_cm)
             w_percent = target_width / img_array.shape[1]
             target_height = int(img_array.shape[0] * w_percent)
-            
+
             block_size = max(8, min(img_array.shape[0], img_array.shape[1]) // 60)
             cell_size = min(380 / target_width, 250 / target_height)
-            
+            base_radius = cell_size / 2 - 0.1
+
+            # Для предпросмотра будем строить маленькое изображение схемы
+            preview_scale = 0.5  # уменьшим для скорости
+            pw = int(target_width * preview_scale)
+            ph = int(target_height * preview_scale)
+            preview_img = Image.new("RGB", (pw, ph), "white")
+            draw_preview = ImageDraw.Draw(preview_img)
+
+            stats = {}
+            total_pixels = target_height
+
+            # Создание PDF (заранее)
+            self.update_status("Построение схемы...", 30)
+            pdf = FPDF(orientation='L', unit='mm', format='A3')
+            pdf.add_page()
+
             for y in range(target_height):
+                # Прогресс и обновление UI
+                percent = 30 + (y / total_pixels) * 50  # 30..80%
+                if y % 10 == 0:
+                    self.update_progress(percent)
                 for x in range(target_width):
-                    # Определяем оригинальные координаты
                     orig_y = int(y / target_height * img_array.shape[0])
                     orig_x = int(x / target_width * img_array.shape[1])
-                    
-                    # Блок для сложности
+
+                    # Сложность блока
                     block_y = min(orig_y // block_size, (img_array.shape[0] // block_size) - 1)
                     block_x = min(orig_x // block_size, (img_array.shape[1] // block_size) - 1)
-                    
                     block = edges[block_y*block_size:(block_y+1)*block_size,
                                  block_x*block_size:(block_x+1)*block_size]
                     complexity = np.count_nonzero(block) / (block_size * block_size)
-                    
+
                     # Радиус кружка
-                    base_radius = cell_size / 2 - 0.1
                     if complexity > 0.3:
                         radius = base_radius * 0.6
                     elif complexity > 0.1:
                         radius = base_radius * 0.8
                     else:
                         radius = base_radius
-                    
-                    # Цвет
+
+                    actual_diameter = bead_size_mm * (radius / base_radius)
+                    ss_name, _ = get_closest_strass(actual_diameter, STRASS_SIZES)
+
                     r, g, b = quantized.getpixel((orig_x, orig_y))
+
+                    # PDF
                     pdf.set_fill_color(r, g, b)
-                    
                     cx = x * cell_size + 10 + cell_size/2
                     cy = y * cell_size + 10 + cell_size/2
-                    # ИСПРАВЛЕНО: используем ellipse вместо circle
                     pdf.ellipse(cx - radius, cy - radius, 2*radius, 2*radius, 'F')
-            
-            # Сохранение
-            save_path = filedialog.asksaveasfilename(defaultextension=".pdf", filetypes=[("PDF files", "*.pdf")])
-            if save_path:
-                pdf.output(save_path)
-                self.status_label.config(text=f"Схема сохранена: {os.path.basename(save_path)}")
-                messagebox.showinfo("Успех", "Схема успешно создана!")
-            else:
-                self.status_label.config(text="Сохранение отменено")
+
+                    # Статистика
+                    key = (r, g, b, ss_name)
+                    stats[key] = stats.get(key, 0) + 1
+
+                    # Предпросмотр (маленькое изображение)
+                    px = int(x * preview_scale)
+                    py = int(y * preview_scale)
+                    if 0 <= px < pw and 0 <= py < ph:
+                        # Рисуем кружок в preview (просто крупный пиксель)
+                        draw_preview.ellipse([px-1, py-1, px+1, py+1], fill=(r,g,b))
+
+            self.update_status("Формирование легенды...", 85)
+            # Легенда PDF
+            pdf.add_page()
+            pdf.set_font("Arial", size=8)
+            pdf.text(10, 10, "Легенда схемы (цвет, размер стразы, количество штук)")
+
+            y_cursor = 18
+            grouped = {}
+            for (r, g, b, ss), count in sorted(stats.items(), key=lambda x: (x[0][0], x[0][1], x[0][2], x[0][3])):
+                grouped.setdefault((r,g,b), []).append((ss, count))
+
+            for (r,g,b), items in grouped.items():
+                pdf.set_fill_color(r, g, b)
+                pdf.rect(10, y_cursor, 4, 4, 'F')
+                pdf.set_text_color(0, 0, 0)
+                ss_list = ", ".join([f"{ss}: {cnt} шт." for ss, cnt in items])
+                pdf.text(16, y_cursor + 3, f"RGB({r},{g},{b})   {ss_list}")
+                y_cursor += 6
+                if y_cursor > 190:
+                    pdf.add_page()
+                    y_cursor = 10
+
+            self.pdf = pdf
+            self.stats = stats
+            self.schema_preview = preview_img
+            self.update_status("Готово!", 100)
+            self.progress_var.set(100)
+            messagebox.showinfo("Успех", "Схема создана. Теперь можно сохранить PDF или изображение.")
+
         except Exception as e:
-            self.status_label.config(text="Ошибка при обработке!")
+            self.update_status(f"Ошибка: {e}", 0)
             messagebox.showerror("Ошибка", str(e))
+
+    def update_status(self, text, percent):
+        self.status_label.config(text=text)
+        self.progress_var.set(percent)
+        self.update_idletasks()
+
+    def update_progress(self, percent):
+        self.progress_var.set(percent)
+        self.update_idletasks()
+
+    def show_schema_preview(self):
+        if self.schema_preview is None:
+            messagebox.showinfo("Предпросмотр", "Сначала сгенерируйте схему.")
+            return
+        # Создаём новое окно
+        preview_win = tk.Toplevel(self)
+        preview_win.title("Предпросмотр схемы")
+        w, h = self.schema_preview.size
+        # Масштабируем, если оно большое
+        max_size = 800
+        if w > max_size or h > max_size:
+            ratio = min(max_size/w, max_size/h)
+            w, h = int(w*ratio), int(h*ratio)
+            show_img = self.schema_preview.resize((w, h), Image.Resampling.NEAREST)
+        else:
+            show_img = self.schema_preview
+        photo = ImageTk.PhotoImage(show_img)
+        canvas = tk.Canvas(preview_win, width=w, height=h)
+        canvas.pack()
+        canvas.create_image(0,0, image=photo, anchor=tk.NW)
+        canvas.image = photo
+        # Кнопка закрытия
+        tk.Button(preview_win, text="Закрыть", command=preview_win.destroy).pack(pady=5)
+
+    def save_schema_image(self, fmt):
+        if self.schema_preview is None:
+            messagebox.showinfo("Сохранение", "Сначала сгенерируйте схему.")
+            return
+        path = filedialog.asksaveasfilename(defaultextension=f".{fmt}",
+                                            filetypes=[(f"{fmt.upper()} files", f"*.{fmt}")])
+        if path:
+            self.schema_preview.save(path)
+            self.status_label.config(text=f"Изображение сохранено: {os.path.basename(path)}")
+            messagebox.showinfo("Сохранение", f"Файл {path} сохранён.")
 
 if __name__ == "__main__":
     app = Application()
