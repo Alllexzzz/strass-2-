@@ -1,7 +1,10 @@
-Pillow
-opencv-python-headless
-fpdf
-numpy
-rembg
-onnxruntime
-pymatting
+Pillow==10.1.0
+opencv-python-headless==4.8.1.78
+fpdf==1.7.2
+numpy==1.26.2
+rembg==2.0.57
+onnxruntime==1.16.3
+pymatting==1.1.8
+scipy==1.11.4
+scikit-image==0.22.0
+pooch==1.8.1
