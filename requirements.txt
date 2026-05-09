@@ -3,3 +3,4 @@ opencv-python-headless
 fpdf
 numpy
 rembg
+onnxruntime
