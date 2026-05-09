@@ -4,3 +4,4 @@ fpdf
 numpy
 rembg
 onnxruntime
+pymatting
